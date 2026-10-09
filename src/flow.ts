@@ -70,6 +70,10 @@ const settingsTrigger = (page: Page) => page.getByRole("button", { name: "Settin
 // Video tiles at rest expose neither, and their signed thumbnail URL is re-signed over time - using it as a handle
 // made old tiles look new. Titles are stable, so an id-less tile is identified by its title instead.
 const TILE_ID_JS = `(tile) => {
+  // A tile that is still rendering already has a title. Counting it as finished made the download run
+  // while the only button was "Reuse prompt", so the tile menu never opened and the clip looked lost.
+  if (tile.querySelector("flow-pending-tile")) return undefined;
+  if (/\\d+%/.test(tile.innerText || "")) return undefined;
   const media = tile.querySelector("img[data-media-id], video[data-media-id], img[src], video[src]");
   const id = media && (media.getAttribute("data-media-id") || media.getAttribute("src")?.match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0]);
   if (id) return id;
@@ -300,23 +304,45 @@ const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const optionByName = (list: Locator, name: string) =>
   list.getByRole("option", { name: new RegExp(`^${escapeRe(name)}`, "i") }).first();
 
-// The frame pickers attach on click; the ingredients picker only previews and needs "Add to prompt".
-// Option names are "<asset name>" or "<asset name> Image|Video", so match on the prefix.
-async function attachAsset(page: Page, opener: Locator, assetName: string): Promise<void> {
-  await opener.click();
-  const list = page.getByRole("listbox", { name: "Asset list" });
-  await list.waitFor({ state: "visible", timeout: 10_000 });
+// The asset list is virtual: only the first screen of options is in the DOM. Search mounts the rest.
+async function revealAssetOption(page: Page, list: Locator, assetName: string): Promise<Locator> {
+  const shown = (option: Locator) => option.isVisible().catch(() => false);
   let option = optionByName(list, assetName);
+  if (await shown(option)) return option;
+  const search = page.getByRole("textbox", { name: "Search assets" });
+  if (await search.isVisible().catch(() => false)) {
+    await search.fill(assetName);
+    await pause(page, 900);
+    option = optionByName(list, assetName);
+    if (await shown(option)) return option;
+    await search.fill("").catch(() => {});
+    await pause(page, 400);
+    option = optionByName(list, assetName);
+  }
   // Voices, characters and avatars live behind their own tabs, so look there when "All" does not have it.
-  if (!(await option.isVisible().catch(() => false))) {
+  if (!(await shown(option))) {
     for (const tab of ["Voices", "Characters", "Avatars", "Uploads"]) {
       const t = page.getByRole("tab", { name: tab, exact: true });
       if (!(await t.isVisible().catch(() => false))) continue;
       await t.click();
       await pause(page, 1200);
       option = optionByName(list, assetName);
-      if (await option.isVisible().catch(() => false)) break;
+      if (await shown(option)) break;
     }
+  }
+  return option;
+}
+
+// The frame pickers attach on click; the ingredients picker only previews and needs "Add to prompt".
+// Option names are "<asset name>" or "<asset name> Image|Video", so match on the prefix.
+async function attachAsset(page: Page, opener: Locator, assetName: string): Promise<void> {
+  await opener.click();
+  const list = page.getByRole("listbox", { name: "Asset list" });
+  await list.waitFor({ state: "visible", timeout: 10_000 });
+  const option = await revealAssetOption(page, list, assetName);
+  if (!(await option.isVisible().catch(() => false))) {
+    await page.keyboard.press("Escape").catch(() => {});
+    throw new Error(`No asset titled "${assetName}" in the Flow picker. Use flow_assets to list titles.`);
   }
   await option.waitFor({ state: "visible", timeout: 10_000 });
   await option.click();
@@ -421,16 +447,37 @@ async function waitForDownloadedFile(page: Page, before: Set<string>, timeoutMs:
 }
 
 // Flow reveals a tile's controls on a genuine pointer move, so the mouse is driven to the tile itself.
+// A video tile swaps its thumbnail for a <video> on that first move, and the swap drops :hover, so the hotbar
+// stays visibility:hidden. A second move, onto the video, puts :hover back on the inner container.
 async function hoverTile(page: Page, tile: Locator): Promise<void> {
   await tile.scrollIntoViewIfNeeded();
   const box = await tile.boundingBox();
-  if (box) {
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await pause(page, 900);
-  } else {
+  if (!box) {
     await tile.hover();
     await pause(page, 900);
+    return;
   }
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await pause(page, 450);
+  await page.mouse.move(box.x + box.width * 0.82, box.y + Math.min(28, box.height * 0.15));
+  await pause(page, 500);
+}
+
+// Opens Flow's tile menu. The hotbar's "More options" is the real control. A right-click is only a fallback for
+// stills: on a <video> it raises Chrome's own menu, which has no Flow items, and the download then looks failed.
+async function openTileMenu(page: Page, tile: Locator): Promise<void> {
+  const more = tile.getByRole("button", { name: "More options" });
+  for (let i = 0; i < 2; i++) {
+    await hoverTile(page, tile);
+    if (await more.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await more.click();
+      return;
+    }
+  }
+  if (await tile.locator("video").count()) {
+    throw new Error("Flow's tile menu did not open.");
+  }
+  await tile.click({ button: "right" });
 }
 
 // Chrome's "allowAndName" writes each download under a bare id with NO extension, so there is nothing to copy from
@@ -476,10 +523,7 @@ function unpackTakes(zip: string, targetStem: string): string[] {
 // tile to our own scene name fixes it at the source - the user's suggestion, and the right one.
 async function renameTile(page: Page, tile: Locator, title: string): Promise<boolean> {
   try {
-    await hoverTile(page, tile);
-    const more = tile.getByRole("button", { name: "More options" });
-    if (!(await more.isVisible({ timeout: 3000 }).catch(() => false))) return false;
-    await more.click();
+    await openTileMenu(page, tile);
     const rename = page.getByRole("menuitem", { name: "Rename", exact: true });
     if (!(await rename.isVisible({ timeout: 4000 }).catch(() => false))) {
       await page.keyboard.press("Escape");
@@ -508,10 +552,7 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
       const before = downloadsNow();
       // Flow only shows a tile's toolbar for a real pointer move over it - Playwright's hover() does not trigger it.
       // The toolbar's "More options" beats a right-click, which can land on the <video> and raise Chrome's own menu.
-      await hoverTile(page, tile);
-      const more = tile.getByRole("button", { name: "More options" });
-      if (await more.isVisible({ timeout: 3000 }).catch(() => false)) await more.click();
-      else await tile.click({ button: "right" });
+      await openTileMenu(page, tile);
       const download = page.getByRole("menuitem", { name: "Download", exact: true });
       if (!(await download.isVisible({ timeout: 8000 }).catch(() => false))) {
         // Saying what Flow actually offered turns "locator timed out" into something that explains itself next time.
@@ -548,14 +589,34 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
   throw lastError;
 }
 
+// Flow follows the Google account language. Every selector below is the English accessible name,
+// so a non-English UI just sits on locator timeouts and then errors. hl=en switches this tab only.
+async function ensureEnglish(page: Page): Promise<void> {
+  const lang = await page.evaluate(() => document.documentElement.lang || "").catch(() => "");
+  if (lang.toLowerCase().startsWith("en")) return;
+  let url: URL;
+  try {
+    url = new URL(page.url());
+  } catch {
+    return;
+  }
+  if (!/flow\.google\.com|labs\.google/.test(url.hostname)) return;
+  if (url.searchParams.get("hl") === "en") return;
+  url.searchParams.set("hl", "en");
+  await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
+  await pause(page, 2500);
+}
+
 async function ensureProjectGrid(page: Page): Promise<void> {
   await dismissOverlays(page);
   const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0];
-  if (root && page.url() !== root) {
-    await page.goto(root, { waitUntil: "domcontentloaded" });
+  const here = page.url().split(/[?#]/)[0].replace(/\/$/, "");
+  if (root && here !== root) {
+    await page.goto(`${root}?hl=en`, { waitUntil: "domcontentloaded" });
     await pause(page, 2500);
   }
-  await page.getByRole("navigation", { name: "Project navigation" }).getByText("All media", { exact: true }).click().catch(() => {});
+  await ensureEnglish(page);
+  await page.getByRole("navigation", { name: "Project navigation" }).getByText("All media", { exact: true }).click({ timeout: 8000 }).catch(() => {});
   await pause(page, 800);
   await scrollToTop(page);
 }
@@ -568,8 +629,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const s = job.params;
 
   await ensureProjectGrid(page);
-  const agent = page.getByRole("button", { name: "Agent", exact: true });
-  if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
+  await setAgentMode(page, false);
   const clear = page.getByRole("button", { name: "Clear prompt" });
   if (await clear.isVisible().catch(() => false)) await clear.click();
 
@@ -1062,11 +1122,24 @@ export async function runEdit(job: Job): Promise<string[]> {
 async function setAgentMode(page: Page, on: boolean): Promise<void> {
   const agent = page.getByRole("button", { name: "Agent", exact: true });
   for (let attempt = 0; attempt < 3; attempt++) {
+    // Flow opens an agent session on the project. That panel covers the Agent chip, and getAttribute
+    // then waits out the full locator timeout — the render looks frozen, then errors.
+    // Close only that panel. closeAgentSession also wipes the composer, which would drop a frame
+    // flow_continue just attached.
+    if (!(await agent.isVisible().catch(() => false))) {
+      const panel = page.getByRole("button", { name: "Start new session" });
+      if (await panel.isVisible().catch(() => false)) {
+        await page.getByRole("button", { name: "Close", exact: true }).click({ timeout: 5000 }).catch(() => {});
+        await pause(page, 1000);
+      }
+      continue;
+    }
     if (((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") === on) return;
     await agent.click({ timeout: 8000 }).catch(() => {});
     await pause(page, 1500);
   }
-  if (((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") !== on) {
+  const pressed = await agent.getAttribute("aria-pressed", { timeout: 3000 }).catch(() => null);
+  if ((pressed === "true") !== on) {
     throw new Error(`Could not switch Agent mode ${on ? "on" : "off"}; the composer may be covered by the agent session panel.`);
   }
 }
@@ -1203,13 +1276,23 @@ async function agentRound(
   // prompt Flow stored for it ("Reuse prompt" puts that text in the composer).
   const prompts: string[] = [];
   for (const tile of fresh) {
-    await scanGrid(page, (seen) => seen.some((x) => x.id === tile.id));
-    const el = mediaTile(page, tile.id!);
-    await el.scrollIntoViewIfNeeded();
-    await el.hover();
-    await el.getByRole("button", { name: "Reuse prompt" }).click();
-    await pause(page, 900);
-    prompts.push(await page.locator(".ProseMirror").first().innerText());
+    let text = "";
+    try {
+      await scanGrid(page, (seen) => seen.some((x) => x.id === tile.id));
+      const el = mediaTile(page, tile.id!);
+      // Find the tile where it is. Scrolling the grid to the top first unmounts it.
+      await hoverTile(page, el);
+      await el.getByRole("button", { name: "Reuse prompt" }).click({ timeout: 8000 });
+      await pause(page, 900);
+      // The composer sits in the top bar, which Flow sets to visibility:hidden once the grid
+      // is scrolled. innerText then waits out the locator timeout and the whole batch dies,
+      // even though the images are already in the grid.
+      await scrollToTop(page);
+      text = await page.locator(".ProseMirror").first().innerText({ timeout: 5000 });
+    } catch {
+      text = "";
+    }
+    prompts.push(text);
   }
   await closeAgentSession(page);
 

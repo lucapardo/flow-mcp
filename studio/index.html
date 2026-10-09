@@ -896,8 +896,8 @@ $("#galTrashDir").onclick = async () => {
   if (await discardLocal(p.dir, `the "${p.name}" folder and its ${p.files.length} file(s)`)) loadGallery();
 };
 $("#jobs").addEventListener("click", async (e) => {
-  const r = e.target.closest("[data-retry]"), c = e.target.closest("[data-cancel]");
-  try { if (r) await api("retry", { job_ids: [r.dataset.retry] }); if (c) await api("cancel", { job_id: c.dataset.cancel }); if (r || c) poll(); }
+  const r = e.target.closest("[data-retry]"), c = e.target.closest("[data-cancel]"), d = e.target.closest("[data-dismiss]");
+  try { if (r) await api("retry", { job_ids: [r.dataset.retry] }); if (c) await api("cancel", { job_id: c.dataset.cancel }); if (d) await api("dismiss", { job_id: d.dataset.dismiss }); if (r || c || d) poll(); }
   catch (err) { toast(err.message, true); }
 });
 function renderStatus(st) {
@@ -917,7 +917,7 @@ function renderStatus(st) {
     renderStatus.sig = sig;
     $("#jobs").innerHTML = jobs.map((j) => `<div class="job"><div class="top"><span class="name">${esc((j.project || "").split(/[\\/]/).pop())} · ${esc(j.scene)}</span>
       <span class="badge ${j.status}">${j.status}${j.progress ? " " + esc(j.progress) : ""}</span>${j.credits !== undefined ? `<span class="badge">${j.credits} cr</span>` : ""}${j.attempts > 1 ? `<span class="badge">try ${j.attempts}</span>` : ""}
-      ${j.status === "queued" ? `<button class="btn small ghost" data-cancel="${j.id}">Cancel</button>` : ""}${/failed|cancelled/.test(j.status) ? `<button class="btn small" data-retry="${j.id}">Retry</button>` : ""}</div>
+      ${j.status === "queued" ? `<button class="btn small ghost" data-cancel="${j.id}">Cancel</button>` : ""}${/failed|cancelled/.test(j.status) ? `<button class="btn small" data-retry="${j.id}">Retry</button>` : ""}<button class="btn small ghost" data-dismiss="${j.id}">Remove</button></div>
       ${j.status === "running" ? `<div class="meter"><i style="width:${parseInt(j.progress) || 4}%"></i></div>` : ""}
       <p>${esc(j.prompt)}</p>${j.note ? `<p style="color:var(--warn)">${esc(j.note)}</p>` : ""}${j.error ? `<p class="err">${esc(j.error)}</p>` : ""}
       ${j.files.map((p) => (/\.(mp4|webm|mov)$/i.test(p) ? `<video controls playsinline preload="metadata" src="${media(p)}"></video>` : /\.(m4a|mp3|wav)$/i.test(p) ? `<audio controls src="${media(p)}"></audio>` : `<img class="out" src="${media(p)}">`)).join("")}</div>`).join("") || `<p class="empty">Nothing queued yet.</p>`;

@@ -103,6 +103,18 @@ export class JobQueue {
     return job;
   }
 
+  // Drops the job from the monitor. A queued one is marked cancelled first so a worker that already holds it will not start it.
+  dismiss(id: string): Job | undefined {
+    const job = this.jobs.get(id);
+    if (!job) return undefined;
+    if (job.status === "queued") {
+      job.status = "cancelled";
+      job.finishedAt = new Date().toISOString();
+    }
+    this.jobs.delete(id);
+    return job;
+  }
+
   private async work(): Promise<void> {
     if (this.working) return;
     this.working = true;
