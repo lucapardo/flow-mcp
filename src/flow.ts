@@ -18,7 +18,6 @@ export interface FlowState {
 
 const IMAGE_TIMEOUT_MS = 3 * 60_000;
 const VIDEO_TIMEOUT_MS = 12 * 60_000;
-const FAILURE_TEXT = /failed|couldn.t|unable/i;
 
 const pause = (page: Page, ms: number) => page.waitForTimeout(ms);
 
@@ -1087,6 +1086,8 @@ export async function runEdit(job: Job): Promise<string[]> {
   await pause(page, 600);
   const start = page.getByRole("button", { name: "Start generation" });
   if (!(await start.isEnabled())) throw new Error("Flow did not accept the edit prompt (Start generation stayed disabled).");
+  // History keeps older failures. Only a tile that appears after Start belongs to this edit.
+  const errorsBefore = await page.locator("flow-error-tile").count();
   await start.click();
 
   // Progress shows as "NN% <prompt>" inside the edit view and disappears when the edit is ready.
@@ -1099,8 +1100,11 @@ export async function runEdit(job: Job): Promise<string[]> {
     job.progress = pct;
     if (pct) seenProgress = true;
     else if (seenProgress) break;
-    const failure = text.split("\n").find((l) => FAILURE_TEXT.test(l) && !l.includes(prompt));
-    if (!pct && failure && Date.now() > deadline - EDIT_TIMEOUT_MS + 15_000) throw new Error(`Flow reported a failed edit: ${failure.slice(0, 300)}`);
+    const errorsNow = await page.locator("flow-error-tile").count();
+    if (!pct && errorsNow > errorsBefore && Date.now() > deadline - EDIT_TIMEOUT_MS + 15_000) {
+      const message = (await page.locator("flow-error-tile .error-message-text").first().innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+      throw new Error(`Flow reported a failed edit: ${message || "Failed"}`);
+    }
     if (Date.now() > deadline) throw new Error("Timed out waiting for Flow to finish the edit.");
   }
   job.progress = undefined;

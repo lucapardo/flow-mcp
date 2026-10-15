@@ -71,6 +71,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--tally)}
 .slot:hover{border-color:var(--tally);color:var(--bone)}
 .slot img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.75}
 .slot .tag{position:relative;background:rgba(20,17,14,.85);padding:4px 10px;border-radius:8px;color:var(--bone);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#nametip{position:fixed;z-index:90;max-width:min(440px,calc(100vw - 24px));padding:8px 12px;background:var(--bone);color:var(--ink);border-radius:8px;font:700 14px var(--mono);pointer-events:none;box-shadow:0 10px 28px rgba(0,0,0,.45);white-space:normal;overflow-wrap:anywhere}
 .slot .two{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
 .slot .two button{min-height:44px;padding:0 12px;font:700 15px var(--mono);color:var(--bone);background:var(--ink3);border:2px solid var(--line);border-radius:10px;cursor:pointer}
 .slot .two button:hover{border-color:var(--tally)}
@@ -440,7 +441,7 @@ function slotHtml(kind, i, val, label) {
   const name = val ? (val.asset ?? val.name) : "";
   const pic = val?.path && /\.(jpe?g|png|webp|gif)$/i.test(val.path);
   return `<div class="slot" data-slot="${kind}" data-i="${i}">${pic ? `<img src="${media(val.path)}">` : ""}
-    ${val ? `<button class="x" data-clear="${kind}" data-i="${i}">×</button><span class="tag">${esc(name)}</span>`
+    ${val ? `<button class="x" data-clear="${kind}" data-i="${i}">×</button><span class="tag" tabindex="0">${esc(name)}</span>`
           : `<span>${label}</span><span class="two"><button type="button" data-src="upload">Upload</button><button type="button" data-src="flow">${/music|voiceover/.test(kind) ? "My narrations" : "From Flow"}</button></span>`}</div>`;
 }
 function setSlot(kind, idx, val) {
@@ -451,6 +452,30 @@ function setSlot(kind, idx, val) {
   else { const [, group, i] = kind.split(":"); S[group].scenes[+i][kind.startsWith("first") ? "first" : "last"] = val; }
   save(); renderAll();
 }
+const nametip = document.createElement("div");
+nametip.id = "nametip";
+nametip.hidden = true;
+document.body.append(nametip);
+function placeNameTip(el) {
+  const full = el.textContent.trim();
+  if (!full || el.scrollWidth <= el.clientWidth + 1) { nametip.hidden = true; return; }
+  nametip.textContent = full;
+  nametip.hidden = false;
+  const r = el.getBoundingClientRect();
+  const w = nametip.offsetWidth, h = nametip.offsetHeight;
+  let left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+  let top = r.bottom + 8;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 8);
+  nametip.style.left = `${left}px`;
+  nametip.style.top = `${top}px`;
+}
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest?.(".slot .tag");
+  if (el) placeNameTip(el); else if (!e.target.closest?.("#nametip")) nametip.hidden = true;
+});
+document.addEventListener("focusin", (e) => { if (e.target.matches?.(".slot .tag")) placeNameTip(e.target); });
+document.addEventListener("focusout", (e) => { if (e.target.matches?.(".slot .tag")) nametip.hidden = true; });
+document.addEventListener("scroll", () => { nametip.hidden = true; }, true);
 document.addEventListener("click", (e) => {
   const clear = e.target.closest("[data-clear]");
   if (clear) { e.stopPropagation(); return setSlot(clear.dataset.clear, clear.dataset.i, null); }
